@@ -1,0 +1,21 @@
+node_modules/
+dist/
+build/
+.vite/
+*.tsbuildinfo
+.eslintcache
+
+# ---- Secrets / env ----
+.env
+.env.*
+!.env.example
+
+# ---- VCS / IDE ----
+.git/
+.gitignore
+.vscode/
+.idea/
+*.swp
+
+# ---- Docs ----
+README.md

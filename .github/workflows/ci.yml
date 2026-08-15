@@ -1,0 +1,116 @@
+name: CI
+
+# Step 14 — runs on every push/PR to main/develop. Fails the build if
+# linting, type checking, tests, or either app's build fails (per the
+# Step 14 requirement). No deployment happens here — see cd.yml.
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    name: Backend (lint, type-check, test, build)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: repogpt
+          POSTGRES_PASSWORD: ci_test_password
+          POSTGRES_DB: repogpt_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U repogpt -d repogpt_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      APP_ENV: test
+      APP_DEBUG: "false"
+      SECRET_KEY: ci-test-secret-key
+      JWT_SECRET_KEY: ci-test-jwt-secret-key
+      ALLOWED_ORIGINS: http://localhost:3000
+      DATABASE_URL: postgresql+asyncpg://repogpt:ci_test_password@localhost:5432/repogpt_test
+      REDIS_URL: redis://localhost:6379/0
+      REPOSITORY_STORAGE_PATH: data/repositories
+      CHROMA_PERSIST_DIR: data/chroma_db
+      EMBEDDING_PROVIDER: huggingface
+      GEMINI_API_KEY: ci-test-key-not-a-real-key
+      GEMINI_MODEL: gemini-1.5-flash
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+
+      - name: Install backend dependencies
+        run: pip install -r requirements.txt
+
+      - name: Prepare local storage directories
+        run: mkdir -p data/repositories data/chroma_db
+
+      - name: Lint (ruff)
+        run: ruff check .
+
+      - name: Format check (black)
+        run: black --check .
+
+      - name: Type check (mypy)
+        run: mypy app
+
+      - name: Run tests
+        run: pytest --cov=app --cov-report=term-missing
+
+      - name: Build backend Docker image
+        run: docker build -t repogpt-backend:ci .
+
+  frontend:
+    name: Frontend (lint, type-check, build)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Run frontend linting
+        run: npm run lint
+
+      - name: Build frontend (tsc type-check + Vite build)
+        run: npm run build
+        env:
+          VITE_API_BASE_URL: http://localhost:8000
+
+      - name: Build frontend Docker image (production target)
+        run: docker build --target production -t repogpt-frontend:ci .

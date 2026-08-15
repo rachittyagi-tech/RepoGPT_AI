@@ -1,0 +1,99 @@
+
+# =============================================================================
+# docker-compose.yml — Local development orchestration (Step 14)
+#
+# Services: backend (FastAPI, hot-reload), frontend (Vite dev server, HMR),
+#           db (PostgreSQL).
+#
+# CHANGED FROM THE EARLIER SCAFFOLD — read before assuming this is the same
+# file as before:
+#   - Removed the standalone `chromadb` service. The backend's vector store
+#     (app/database/chromadb_client.py) uses ChromaDB's PersistentClient —
+#     an embedded, in-process client that reads/writes a local directory —
+#     NOT an HTTP server. A separate `chromadb/chroma` container was never
+#     actually connected to by any backend code; ChromaDB persistence here
+#     comes from the `./backend:/app` bind mount covering `data/chroma_db`.
+#   - Removed the `worker` (Celery) service. It ran
+#     `celery -A app.core.celery_app worker`, but that module was never
+#     implemented in Steps 1-13 — the container would crash on start. Add
+#     it back once a real Celery app module exists.
+#   - Removed the `redis` service. Nothing in the codebase consumes
+#     REDIS_URL yet; it stays as a reserved setting in app/core/settings.py
+#     for when caching/rate-limiting/a real task queue is actually built.
+#   - Added `build.target: dev` on the frontend service — frontend/Dockerfile
+#     is now multi-stage, and without an explicit target Docker would build
+#     the final `production` (Nginx) stage instead of the Vite dev server.
+#   - Added a Postgres healthcheck + `depends_on: condition: service_healthy`
+#     so the backend doesn't race Postgres's startup.
+# =============================================================================
+
+services:
+  # ---------------- Backend API ----------------
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: repogpt_backend
+    env_file: .env
+    environment:
+      APP_ENV: development
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend:/app
+    depends_on:
+      db:
+        condition: service_healthy
+    # Overrides the image's production Gunicorn CMD with hot-reloading Uvicorn.
+    command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+    networks:
+      - repogpt_network
+
+  # ---------------- Frontend (Vite dev server) ----------------
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      target: dev
+    container_name: repogpt_frontend
+    env_file: .env
+    environment:
+      VITE_API_BASE_URL: http://localhost:8000
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    depends_on:
+      - backend
+    networks:
+      - repogpt_network
+
+  # ---------------- PostgreSQL ----------------
+  db:
+    image: postgres:16-alpine
+    container_name: repogpt_postgres
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - repogpt_network
+
+networks:
+  repogpt_network:
+    driver: bridge
+
+volumes:
+  postgres_data:

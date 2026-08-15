@@ -1,0 +1,81 @@
+# ============================
+# RepoGPT AI — .gitignore
+# ============================
+
+# ---- Python / Backend ----
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+*.egg-info/
+.eggs/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+htmlcov/
+.coverage
+coverage.xml
+
+# ---- Environment / Secrets ----
+# Step 14: catch-all for every real env file (.env, .env.production,
+# .env.development, .env.staging, etc.) while explicitly keeping the
+# checked-in *.example templates that document the required variables.
+.env
+.env.*
+!.env.example
+!.env.development.example
+!.env.production.example
+.env.local
+*.pem
+*.key
+secrets/
+
+# ---- Node / Frontend ----
+node_modules/
+.next/
+out/
+dist/
+build/
+.turbo/
+.vite/
+*.tsbuildinfo
+.eslintcache
+
+# ---- Vector DB / Data ----
+vector_store/
+data/raw/
+data/processed/
+backend/data/repositories/*
+!backend/data/repositories/.gitkeep
+backend/data/chroma_db/*
+!backend/data/chroma_db/.gitkeep
+*.sqlite3
+*.db
+
+# ---- Docker ----
+*.pid
+
+# ---- Logs ----
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# ---- IDE / OS ----
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# ---- Cloned repos for analysis (runtime artifacts) ----
+backend/repos_cache/
+backend/tmp/

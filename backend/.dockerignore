@@ -1,0 +1,46 @@
+# Keep the build context small and never ship secrets/dev artifacts into an image.
+
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# ---- Virtual envs (image builds its own) ----
+venv/
+.venv/
+env/
+
+# ---- Secrets / env ----
+.env
+.env.*
+!.env.example
+
+# ---- Runtime data (mounted as volumes, never baked into the image) ----
+data/repositories/*
+!data/repositories/.gitkeep
+data/chroma_db/*
+!data/chroma_db/.gitkeep
+logs/
+*.log
+*.sqlite3
+*.db
+
+# ---- Tests (not needed at runtime) ----
+tests/
+
+# ---- VCS / IDE ----
+.git/
+.gitignore
+.vscode/
+.idea/
+*.swp
+
+# ---- Docs ----
+README.md

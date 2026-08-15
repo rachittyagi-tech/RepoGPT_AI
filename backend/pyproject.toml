@@ -1,0 +1,22 @@
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+exclude = ["data", "alembic/versions"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
+ignore = ["B008"]  # FastAPI's Depends(...) as a default arg is the intended pattern
+
+[tool.black]
+line-length = 120
+target-version = ["py312"]
+
+[tool.mypy]
+python_version = "3.12"
+ignore_missing_imports = true
+disallow_untyped_defs = false
+exclude = ["alembic/versions"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

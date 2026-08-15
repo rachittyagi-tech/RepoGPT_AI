@@ -1,0 +1,112 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/*
+  RepoGPT AI — design tokens ("terminal ink" system)
+  Dark is the primary/default mode (a dev tool that lives in dark mode
+  most of the day); light is a fully-specified counterpart, not an
+  afterthought inversion.
+*/
+:root {
+  --bg: 222 24% 6%;
+  --surface: 222 20% 10%;
+  --surface-hover: 222 18% 14%;
+  --border: 225 16% 18%;
+  --foreground: 220 20% 92%;
+  --muted: 222 10% 58%;
+
+  --mint: 156 55% 60%;
+  --mint-foreground: 156 60% 8%;
+
+  --amber: 42 78% 55%;
+  --amber-foreground: 42 70% 10%;
+
+  --danger: 4 70% 60%;
+  --danger-foreground: 0 0% 100%;
+}
+
+.light {
+  --bg: 60 9% 97%;
+  --surface: 0 0% 100%;
+  --surface-hover: 240 10% 96%;
+  --border: 220 13% 88%;
+  --foreground: 224 20% 9%;
+  --muted: 220 9% 44%;
+
+  --mint: 156 64% 32%;
+  --mint-foreground: 0 0% 100%;
+
+  --amber: 38 80% 38%;
+  --amber-foreground: 0 0% 100%;
+
+  --danger: 4 70% 45%;
+  --danger-foreground: 0 0% 100%;
+}
+
+* {
+  border-color: hsl(var(--border));
+}
+
+html {
+  color-scheme: dark;
+}
+html.light {
+  color-scheme: light;
+}
+
+body {
+  background-color: hsl(var(--bg));
+  color: hsl(var(--foreground));
+  font-family: "IBM Plex Sans", system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+::selection {
+  background: hsl(var(--mint) / 0.3);
+}
+
+/* Thin scrollbars, in keeping with the dense editor-like density */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: hsl(var(--border));
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: hsl(var(--muted));
+}
+
+/* Visible keyboard focus ring everywhere, per accessibility floor */
+:focus-visible {
+  outline: 2px solid hsl(var(--mint));
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+.markdown-body pre {
+  border-radius: 8px;
+  overflow-x: auto;
+}
+.markdown-body code:not(pre code) {
+  background: hsl(var(--surface-hover));
+  border: 1px solid hsl(var(--border));
+  padding: 0.1rem 0.35rem;
+  border-radius: 4px;
+  font-size: 0.85em;
+  font-family: "IBM Plex Mono", monospace;
+}

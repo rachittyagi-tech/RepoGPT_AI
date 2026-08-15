@@ -1,0 +1,145 @@
+name: CD
+
+# Step 14 — deployment pipeline template. Runs after CI passes on `main`
+# (via workflow_run) or manually. This builds and publishes versioned
+# Docker images to GitHub Container Registry (GHCR) using the built-in
+# GITHUB_TOKEN — no extra registry secret needed.
+#
+# The actual "deploy" jobs below are STUBS: this repo doesn't commit to a
+# specific host, so the deploy steps are commented out and clearly marked
+# with the GitHub Secrets you'd need to add for whichever deployment
+# option you pick (see README's "Deployment" section for the full
+# Option A vs Option B comparison).
+#
+# NEVER put real credentials directly in this file — always reference
+# them via ${{ secrets.NAME }}, configured in
+# Settings -> Secrets and variables -> Actions.
+
+on:
+  workflow_run:
+    workflows: ["CI"]
+    branches: [main]
+    types: [completed]
+  workflow_dispatch: {}
+
+concurrency:
+  group: cd-production
+  cancel-in-progress: false
+
+env:
+  REGISTRY: ghcr.io
+  BACKEND_IMAGE: ${{ github.repository }}/backend
+  FRONTEND_IMAGE: ${{ github.repository }}/frontend
+
+jobs:
+  build-and-push:
+    name: Build & push Docker images
+    runs-on: ubuntu-latest
+    # Only proceed if this was triggered by a successful CI run (or a
+    # manual dispatch, which has no `workflow_run` conclusion to check).
+    if: ${{ github.event.workflow_run.conclusion == 'success' || github.event_name == 'workflow_dispatch' }}
+    permissions:
+      contents: read
+      packages: write
+
+    outputs:
+      image_tag: ${{ steps.meta.outputs.tag }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Compute image tag
+        id: meta
+        run: echo "tag=$(echo ${GITHUB_SHA} | cut -c1-12)" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build & push backend image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./backend
+          target: runtime
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.BACKEND_IMAGE }}:${{ steps.meta.outputs.tag }}
+            ${{ env.REGISTRY }}/${{ env.BACKEND_IMAGE }}:latest
+
+      - name: Build & push frontend image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./frontend
+          target: production
+          push: true
+          build-args: |
+            VITE_API_BASE_URL=${{ vars.VITE_API_BASE_URL }}
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.FRONTEND_IMAGE }}:${{ steps.meta.outputs.tag }}
+            ${{ env.REGISTRY }}/${{ env.FRONTEND_IMAGE }}:latest
+
+  # ---------------------------------------------------------------------
+  # Deploy — Option B (full Docker deployment to your own host)
+  # ---------------------------------------------------------------------
+  # Uncomment and configure once you have a host. Required secrets:
+  #   DEPLOY_HOST         — server hostname/IP
+  #   DEPLOY_USER         — SSH user
+  #   DEPLOY_SSH_KEY       — private key with access to that user
+  #   ENV_PRODUCTION_FILE  — full contents of your .env.production (store
+  #                          as a single multi-line secret; written to the
+  #                          server just before `docker compose up`)
+  # ---------------------------------------------------------------------
+  deploy-docker-host:
+    name: Deploy (Option B — Docker host)
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    if: false  # flip to `true` once DEPLOY_* secrets are configured
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Deploy over SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          script: |
+            cd /opt/repogpt-ai
+            git pull origin main
+            docker compose -f docker-compose.prod.yml pull
+            docker compose -f docker-compose.prod.yml up -d --remove-orphans
+            docker image prune -f
+
+  # ---------------------------------------------------------------------
+  # Deploy — Option A (Vercel frontend + Render backend/DB)
+  # ---------------------------------------------------------------------
+  # Uncomment and configure once you have Vercel/Render projects created.
+  # Required secrets:
+  #   VERCEL_TOKEN, VERCEL_ORG_ID, VERCEL_PROJECT_ID
+  #   RENDER_DEPLOY_HOOK_URL — Render's per-service deploy-hook URL
+  # ---------------------------------------------------------------------
+  deploy-vercel-render:
+    name: Deploy (Option A — Vercel + Render)
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    if: false  # flip to `true` once VERCEL_*/RENDER_* secrets are configured
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Trigger Render backend deploy
+        run: curl -fsSL -X POST "${{ secrets.RENDER_DEPLOY_HOOK_URL }}"
+
+      - name: Deploy frontend to Vercel
+        uses: amondnet/vercel-action@v25
+        with:
+          vercel-token: ${{ secrets.VERCEL_TOKEN }}
+          vercel-org-id: ${{ secrets.VERCEL_ORG_ID }}
+          vercel-project-id: ${{ secrets.VERCEL_PROJECT_ID }}
+          working-directory: frontend
+          vercel-args: "--prod"

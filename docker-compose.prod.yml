@@ -1,0 +1,115 @@
+
+# =============================================================================
+# docker-compose.prod.yml — Production orchestration (Step 14, Option B)
+#
+# Differences from docker-compose.yml (dev):
+#   - No source bind-mounts — images are immutable; code changes require a
+#     rebuild + redeploy, not a live-reloaded volume.
+#   - Named volumes for repository storage + ChromaDB persistence
+#     (`repositories_data`, `chroma_data`) instead of a bind mount, so
+#     Docker manages the storage lifecycle independent of the host checkout.
+#   - Backend runs its Dockerfile's default CMD (Gunicorn + Uvicorn workers)
+#     instead of `--reload` Uvicorn.
+#   - Frontend builds the `production` (Nginx) target — no explicit
+#     `target:` override needed since it's the Dockerfile's last stage.
+#   - `restart: unless-stopped` on every service, plus conservative resource
+#     limits as a starting point — tune for your actual traffic/instance size.
+#   - Ports: only the frontend's Nginx (80) is published to the host/internet.
+#     `backend` and `db` are reachable only on the internal Docker network —
+#     the frontend's Nginx is what proxies /api/ to the backend (see
+#     frontend/nginx.conf) rather than exposing the backend directly.
+#
+# Usage:
+#   docker compose -f docker-compose.prod.yml --env-file .env.production up -d --build
+# =============================================================================
+
+services:
+  # ---------------- Backend API (Gunicorn + Uvicorn workers) ----------------
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+      target: runtime
+    container_name: repogpt_backend
+    env_file: .env.production
+    environment:
+      APP_ENV: production
+      WEB_CONCURRENCY: ${WEB_CONCURRENCY:-2}
+    volumes:
+      - repositories_data:/app/data/repositories
+      - chroma_data:/app/data/chroma_db
+      - backend_logs:/app/logs
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "1.5"
+          memory: 1.5G
+    networks:
+      - repogpt_network
+
+  # ---------------- Frontend (Nginx: static build + API reverse proxy) ----------------
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      target: production
+      args:
+        # Baked in at build time — see frontend/Dockerfile. In this
+        # single-origin deployment (Option B), the frontend's own Nginx
+        # proxies /api/, so the browser calls its own origin.
+        VITE_API_BASE_URL: ""
+    container_name: repogpt_frontend
+    ports:
+      - "80:80"
+    depends_on:
+      - backend
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
+    networks:
+      - repogpt_network
+
+  # ---------------- PostgreSQL ----------------
+  db:
+    image: postgres:16-alpine
+    container_name: repogpt_postgres
+    env_file: .env.production
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1G
+    networks:
+      - repogpt_network
+    # No published port — only reachable from other containers on
+    # repogpt_network. Expose 5432 to the host only if you need external
+    # DB access (e.g. an ad-hoc psql session or a backup job on the host).
+
+networks:
+  repogpt_network:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  repositories_data:
+  chroma_data:
+  backend_logs:
