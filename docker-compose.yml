@@ -45,7 +45,7 @@ services:
       db:
         condition: service_healthy
     # Overrides the image's production Gunicorn CMD with hot-reloading Uvicorn.
-    command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+    command: uvicorn main:app --host 0.0.0.0 --port 8000 
     networks:
       - repogpt_network
 
