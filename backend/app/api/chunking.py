@@ -1,13 +1,13 @@
-"""
-app/api/chunking.py
+# """
+# app/api/chunking.py
 
-HTTP layer for the Code Processing Pipeline module (Step 5).
+# HTTP layer for the Code Processing Pipeline module (Step 5).
 
-Thin router — validates input via Pydantic, delegates to
-`ChunkingService`, shapes the response. Error translation (no scanned
-files, chunking not yet performed, processing failures) happens via
-domain exceptions + the global exception handlers from Step 2.
-"""
+# Thin router — validates input via Pydantic, delegates to
+# `ChunkingService`, shapes the response. Error translation (no scanned
+# files, chunking not yet performed, processing failures) happens via
+# domain exceptions + the global exception handlers from Step 2.
+# """
 
 from __future__ import annotations
 

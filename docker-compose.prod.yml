@@ -64,7 +64,7 @@ services:
         VITE_API_BASE_URL: ""
     container_name: repogpt_frontend
     ports:
-      - "80:80"
+      - "80:8080"
     depends_on:
       - backend
     restart: unless-stopped
@@ -80,7 +80,6 @@ services:
   db:
     image: postgres:16-alpine
     container_name: repogpt_postgres
-    env_file: .env.production
     environment:
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}

@@ -3,36 +3,52 @@ app/providers/gemini_embedding.py
 
 Google Gemini embedding provider implementation.
 
-Uses the `google-generativeai` SDK's `embed_content` function, which
-accepts a list of strings and returns one embedding per string. The SDK
-call is synchronous, so it's wrapped in `asyncio.to_thread` to avoid
-blocking the event loop.
+Uses Google's Generative AI SDK to generate embeddings.
+The synchronous SDK call is executed in a worker thread so it
+does not block FastAPI's async event loop.
 """
 
 from __future__ import annotations
 
+import asyncio
 from typing import List
 
 from app.core.embedding_config import EmbeddingSettings
-from app.core.exceptions import EmbeddingAuthError, EmbeddingProviderError, EmbeddingRateLimitError
+from app.core.exceptions import (
+    EmbeddingAuthError,
+    EmbeddingProviderError,
+    EmbeddingRateLimitError,
+)
 from app.core.logging import get_logger
 from app.providers.base_embedding import BaseEmbeddingProvider
 
 logger = get_logger("providers.gemini")
 
-# Known output dimensionality per Gemini embedding model. Used to answer
-# `.dimension` without making a network call.
-_MODEL_DIMENSIONS = {
-    "text-embedding-004": 768,
-    "embedding-001": 768,
-}
-_DEFAULT_DIMENSION = 768
 
-# Substrings used to classify google-generativeai's raised exceptions into
-# our standard error types (mirrors the approach in github_service's
-# `_classify_git_error` — keeps error handling consistent app-wide).
-_AUTH_ERROR_MARKERS = ("api key", "unauthorized", "permission denied", "invalid api key")
-_RATE_LIMIT_MARKERS = ("quota", "rate limit", "resource exhausted", "429")
+# Known output dimensionality for supported Gemini embedding models.
+_MODEL_DIMENSIONS = {
+    "gemini-embedding-001": 3072,
+    "gemini-embedding-2-preview": 3072,
+    "gemini-embedding-2": 3072,
+}
+
+_DEFAULT_DIMENSION = 3072
+
+
+_AUTH_ERROR_MARKERS = (
+    "api key",
+    "unauthorized",
+    "permission denied",
+    "invalid api key",
+    "authentication",
+)
+
+_RATE_LIMIT_MARKERS = (
+    "quota",
+    "rate limit",
+    "resource exhausted",
+    "429",
+)
 
 
 class GeminiEmbeddingProvider(BaseEmbeddingProvider):
@@ -48,8 +64,7 @@ class GeminiEmbeddingProvider(BaseEmbeddingProvider):
             self._configure_client()
 
     def _configure_client(self) -> None:
-        """Lazily imports and configures the SDK — avoids a hard import-time
-        dependency on google-generativeai if Gemini is never used."""
+        """Configure the Google Generative AI SDK."""
         import google.generativeai as genai
 
         genai.configure(api_key=self._settings.GEMINI_API_KEY)
@@ -65,25 +80,67 @@ class GeminiEmbeddingProvider(BaseEmbeddingProvider):
 
     @property
     def dimension(self) -> int:
-        return _MODEL_DIMENSIONS.get(self._model, _DEFAULT_DIMENSION)
+        return _MODEL_DIMENSIONS.get(
+            self._model,
+            _DEFAULT_DIMENSION,
+        )
 
     def is_configured(self) -> bool:
         return self._configured and self._client_ready
 
-    async def embed_batch(self, texts: List[str]) -> List[List[float]]:
-        import asyncio
+    async def embed_batch(
+        self,
+        texts: List[str],
+    ) -> List[List[float]]:
+        """
+        Generate embeddings for a batch of texts.
+
+        The Gemini SDK call is synchronous, so it runs inside
+        asyncio.to_thread() to keep the FastAPI event loop responsive.
+        """
 
         if not self.is_configured():
             raise EmbeddingAuthError(self.provider_name)
 
+        if not texts:
+            return []
+
         try:
-            return await asyncio.to_thread(self._embed_batch_sync, texts)
-        except (EmbeddingAuthError, EmbeddingRateLimitError, EmbeddingProviderError):
+            embeddings = await asyncio.to_thread(
+                self._embed_batch_sync,
+                texts,
+            )
+
+            # Validate dimensionality.
+            for embedding in embeddings:
+                if len(embedding) != self.dimension:
+                    raise EmbeddingProviderError(
+                        self.provider_name,
+                        (
+                            f"Unexpected embedding dimension: "
+                            f"{len(embedding)}. "
+                            f"Expected: {self.dimension}."
+                        ),
+                    )
+
+            return embeddings
+
+        except (
+            EmbeddingAuthError,
+            EmbeddingRateLimitError,
+            EmbeddingProviderError,
+        ):
             raise
-        except Exception as exc:  # noqa: BLE001
+
+        except Exception as exc:
             raise self._classify_error(exc) from exc
 
-    def _embed_batch_sync(self, texts: List[str]) -> List[List[float]]:
+    def _embed_batch_sync(
+        self,
+        texts: List[str],
+    ) -> List[List[float]]:
+        """Synchronous Gemini embedding request."""
+
         import google.generativeai as genai
 
         try:
@@ -92,30 +149,65 @@ class GeminiEmbeddingProvider(BaseEmbeddingProvider):
                 content=texts,
                 task_type="retrieval_document",
             )
-        except Exception as exc:  # noqa: BLE001
+
+        except Exception as exc:
             raise self._classify_error(exc) from exc
 
         embeddings = result.get("embedding")
-        if embeddings is None:
-            raise EmbeddingProviderError(self.provider_name, "Response missing 'embedding' field.")
 
-        # The SDK returns a single vector (List[float]) when given one string
-        # and a list of vectors when given a list — normalize to always be
-        # a list of vectors so callers don't need to special-case batch size 1.
-        if texts and isinstance(embeddings[0], float):
-            return [embeddings]
-        return embeddings
+        if embeddings is None:
+            raise EmbeddingProviderError(
+                self.provider_name,
+                "Response missing 'embedding' field.",
+            )
+
+        if not embeddings:
+            raise EmbeddingProviderError(
+                self.provider_name,
+                "Gemini returned an empty embedding response.",
+            )
+
+        # Single text:
+        #   [0.1, 0.2, ...]
+        #
+        # Multiple texts:
+        #   [[0.1, 0.2, ...], [0.3, 0.4, ...]]
+        if isinstance(embeddings[0], (float, int)):
+            return [list(embeddings)]
+
+        return [list(vector) for vector in embeddings]
 
     def _classify_error(self, exc: Exception) -> Exception:
+        """Convert Gemini SDK exceptions into application exceptions."""
+
         message = str(exc).lower()
 
-        if any(marker in message for marker in _AUTH_ERROR_MARKERS):
-            logger.warning("Gemini auth failure: %s", exc)
+        if any(
+            marker in message
+            for marker in _AUTH_ERROR_MARKERS
+        ):
+            logger.warning(
+                "Gemini authentication failure: %s",
+                exc,
+            )
             return EmbeddingAuthError(self.provider_name)
 
-        if any(marker in message for marker in _RATE_LIMIT_MARKERS):
-            logger.warning("Gemini rate limited: %s", exc)
+        if any(
+            marker in message
+            for marker in _RATE_LIMIT_MARKERS
+        ):
+            logger.warning(
+                "Gemini rate limited: %s",
+                exc,
+            )
             return EmbeddingRateLimitError(self.provider_name)
 
-        logger.error("Gemini provider error: %s", exc)
-        return EmbeddingProviderError(self.provider_name, reason=str(exc))
+        logger.error(
+            "Gemini provider error: %s",
+            exc,
+        )
+
+        return EmbeddingProviderError(
+            self.provider_name,
+            reason=str(exc),
+        )

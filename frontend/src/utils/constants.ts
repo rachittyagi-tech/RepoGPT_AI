@@ -24,4 +24,6 @@ export const LOCAL_STORAGE_KEYS = {
   theme: "repogpt.theme",
   activeRepository: "repogpt.active-repository",
   activeConversation: "repogpt.active-conversation",
+  accessToken: "repogpt.access-token",
+  refreshToken: "repogpt.refresh-token",
 };

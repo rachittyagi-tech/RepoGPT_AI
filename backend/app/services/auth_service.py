@@ -22,7 +22,7 @@ from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 
 from fastapi import Depends, Request
-from fastapi.security import OAuth2PasswordBearer
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jose import ExpiredSignatureError, JWTError
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -57,9 +57,7 @@ logger = get_logger("services.auth")
 
 # `tokenUrl` only affects the Swagger "Authorize" button's login form target;
 # actual auth still goes through /api/auth/login (JSON body, not form-encoded).
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="api/v1/auth/login", auto_error=False)
-
-
+bearer_scheme = HTTPBearer(auto_error=False)
 class AuthService:
     """Encapsulates registration, login, logout, refresh, and password-reset flows."""
 
@@ -270,7 +268,7 @@ def get_auth_service(db: AsyncSession = Depends(get_db)) -> AuthService:
 # "Get current user" — the core protected-route dependency
 # ---------------------------------------------------------------------------
 async def get_current_user(
-    token: Optional[str] = Depends(oauth2_scheme),
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(bearer_scheme),
     db: AsyncSession = Depends(get_db),
 ) -> User:
     """
@@ -284,9 +282,10 @@ async def get_current_user(
     malformed/expired/wrong-type, or the user no longer exists;
     InactiveUserError (403) if the account was deactivated.
     """
-    if token is None:
-        raise InvalidTokenError("Missing bearer token.")
+    if credentials is None:
+     raise InvalidTokenError("Missing bearer token.")
 
+    token = credentials.credentials
     try:
         claims = decode_token(token)
     except ExpiredSignatureError:

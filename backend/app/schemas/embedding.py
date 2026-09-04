@@ -51,6 +51,7 @@ class EmbeddingRecord(BaseModel):
 
     document_id: str = Field(..., description="Deterministic ID derived from repo + file + chunk number.")
     embedding: List[float] = Field(default_factory=list)
+    content: str = Field(..., description="Original chunk text stored with the embedding for persistent retrieval.")
     metadata: ChunkMetadata
     processing_time_seconds: float
     dimension: int

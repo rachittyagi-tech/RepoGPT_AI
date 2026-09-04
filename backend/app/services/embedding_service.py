@@ -374,6 +374,7 @@ class EmbeddingService:
         return EmbeddingRecord(
             document_id=document_id,
             embedding=vector,
+            content=chunk.content,
             metadata=chunk.metadata,
             processing_time_seconds=round(processing_time, 4),
             dimension=provider.dimension,

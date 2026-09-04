@@ -386,7 +386,7 @@ class VectorStoreService:
 
             for record in batch:
                 meta = record.metadata
-                documents.append("")  # content lives in Step 5/6 caches; store metadata-only here
+                documents.append(record.content)
                 metadatas.append(
                     {
                         "repository_name": meta.repository_name,
@@ -478,3 +478,4 @@ def get_vector_store_service(
 ) -> VectorStoreService:
     """FastAPI dependency provider — see app/api/vector_store.py."""
     return VectorStoreService(chromadb_client=chromadb_client, embedding_service=embedding_service)
+
