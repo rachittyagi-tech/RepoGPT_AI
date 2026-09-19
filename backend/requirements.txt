@@ -62,4 +62,5 @@ black==24.4.2
 mypy==1.10.0
 
 
-psycopg2-binary
+
+asyncpg==0.30.0
