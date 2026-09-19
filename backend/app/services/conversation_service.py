@@ -1,83 +1,133 @@
 """
 app/services/conversation_service.py
 
-Manages conversation state for the AI Chat Engine (Step 9): creating
-conversations, appending messages, retrieving/clearing history, and
-repository switching within an existing conversation.
+Persistent PostgreSQL-backed conversation storage for RepoGPT AI.
 
-Storage: in-memory, process-wide (class-level dict), same pattern as
-Scanner/Chunking/Embedding services' caches. Conversations do NOT survive
-a server restart — acceptable for this step; a persistent store (Redis/
-Postgres) would be a natural follow-up, not required here.
+Responsibilities:
+- Create and retrieve conversations
+- Keep conversations isolated per authenticated user
+- Store user/assistant messages permanently
+- Persist source references with messages
+- Retrieve recent conversation turns for RAG
+- Clear conversation history
+- Switch repository within a conversation
+- Count conversations for analytics
 """
 
 from __future__ import annotations
 
 import uuid
-from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import ClassVar, Dict, List, Optional
+from typing import List, Optional
+
+from fastapi import Depends
+from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import ConversationNotFoundError
 from app.core.logging import get_logger
+from app.database.session import get_db
+from app.models.conversation import Conversation, ConversationMessage
 from app.schemas.chat import ChatMessage, ChatRole
 from app.schemas.rag import ConversationTurn, SourceReference
 
+
 logger = get_logger("services.conversation")
 
-# Only the most recent N user/assistant turns are handed to the RAG
-# pipeline as conversation context — keeps prompt size bounded regardless
-# of how long a conversation has run (Step 8's own token budget is the
-# hard limit, this just avoids handing it an ever-growing list).
 _MAX_TURNS_FOR_RAG = 6
 
 
-@dataclass
-class Conversation:
-    conversation_id: str
-    repository_name: str
-    messages: List[ChatMessage] = field(default_factory=list)
-    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
-    updated_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
-
-
 class ConversationService:
-    """In-memory conversation store: create, append, retrieve, clear, and switch repositories."""
+    """PostgreSQL-backed conversation service."""
 
-    _CONVERSATIONS: ClassVar[Dict[str, Conversation]] = {}
+    def __init__(self, db: AsyncSession) -> None:
+        self.db = db
 
-    def get_or_create(self, conversation_id: Optional[str], repository_name: str) -> Conversation:
-        """
-        Returns the existing conversation if `conversation_id` is provided
-        and exists, otherwise creates a new one (new UUID if
-        `conversation_id` is None or unknown).
-        """
-        if conversation_id and conversation_id in self._CONVERSATIONS:
-            return self._CONVERSATIONS[conversation_id]
+    async def get_or_create(
+        self,
+        conversation_id: Optional[str],
+        repository_name: str,
+        user_id: uuid.UUID,
+    ) -> Conversation:
+        """Return an existing user-owned conversation or create a new one."""
 
-        new_id = conversation_id or str(uuid.uuid4())
-        conversation = Conversation(conversation_id=new_id, repository_name=repository_name)
-        self._CONVERSATIONS[new_id] = conversation
-        logger.info("Created new conversation | id=%s | repo=%s", new_id, repository_name)
+        if conversation_id:
+            try:
+                conversation_uuid = uuid.UUID(conversation_id)
+            except ValueError:
+                raise ConversationNotFoundError(conversation_id)
+
+            result = await self.db.execute(
+                select(Conversation).where(
+                    Conversation.id == conversation_uuid,
+                    Conversation.user_id == user_id,
+                )
+            )
+
+            conversation = result.scalar_one_or_none()
+
+            if conversation is None:
+                raise ConversationNotFoundError(conversation_id)
+
+            return conversation
+
+        conversation = Conversation(
+            user_id=user_id,
+            repository_name=repository_name,
+            title=None,
+        )
+
+        self.db.add(conversation)
+        await self.db.flush()
+
+        logger.info(
+            "Created new conversation | id=%s | user_id=%s | repo=%s",
+            conversation.id,
+            user_id,
+            repository_name,
+        )
+
         return conversation
 
-    def get(self, conversation_id: str) -> Conversation:
-        """Raises `ConversationNotFoundError` if `conversation_id` doesn't exist."""
-        conversation = self._CONVERSATIONS.get(conversation_id)
+    async def get(
+        self,
+        conversation_id: str,
+        user_id: uuid.UUID,
+    ) -> Conversation:
+        """Return a conversation owned by the authenticated user."""
+
+        try:
+            conversation_uuid = uuid.UUID(conversation_id)
+        except ValueError:
+            raise ConversationNotFoundError(conversation_id)
+
+        result = await self.db.execute(
+            select(Conversation).where(
+                Conversation.id == conversation_uuid,
+                Conversation.user_id == user_id,
+            )
+        )
+
+        conversation = result.scalar_one_or_none()
+
         if conversation is None:
             raise ConversationNotFoundError(conversation_id)
+
         return conversation
 
-    def switch_repository(self, conversation_id: str, new_repository_name: str) -> Conversation:
-        """
-        "Repository Switching": points an existing conversation at a
-        different repository. Prior message history is kept (for
-        conversational continuity of phrasing/tone) but new retrieval
-        calls will target the new repository's vector collection —
-        callers should be aware the assistant's prior answers may
-        reference a different codebase than what's now being searched.
-        """
-        conversation = self.get(conversation_id)
+    async def switch_repository(
+        self,
+        conversation_id: str,
+        new_repository_name: str,
+        user_id: uuid.UUID,
+    ) -> Conversation:
+        """Switch repository while preserving the conversation."""
+
+        conversation = await self.get(
+            conversation_id,
+            user_id,
+        )
+
         if conversation.repository_name != new_repository_name:
             logger.info(
                 "Switching conversation repository | id=%s | %s -> %s",
@@ -85,65 +135,231 @@ class ConversationService:
                 conversation.repository_name,
                 new_repository_name,
             )
+
             conversation.repository_name = new_repository_name
             conversation.updated_at = datetime.now(timezone.utc)
+
+            await self.db.flush()
+
         return conversation
 
-    def add_message(
+    async def add_message(
         self,
         conversation_id: str,
+        user_id: uuid.UUID,
         role: ChatRole,
         content: str,
         sources: Optional[List[SourceReference]] = None,
     ) -> ChatMessage:
-        conversation = self.get(conversation_id)
-        message = ChatMessage(
+        """
+        Persist a conversation message.
+
+        Source references are stored permanently in PostgreSQL as JSONB.
+        """
+
+        conversation = await self.get(
+            conversation_id,
+            user_id,
+        )
+
+        # Set the conversation title from the first user message.
+        if (
+            role == ChatRole.USER
+            and not conversation.title
+            and content.strip()
+        ):
+            title = " ".join(content.strip().split())
+
+            if len(title) > 60:
+                title = title[:57].rstrip() + "..."
+
+            conversation.title = title
+
+        serialized_sources = []
+
+        for source in sources or []:
+            if hasattr(source, "model_dump"):
+                serialized_sources.append(source.model_dump())
+            elif hasattr(source, "dict"):
+                serialized_sources.append(source.dict())
+            elif isinstance(source, dict):
+                serialized_sources.append(source)
+            else:
+                serialized_sources.append(dict(source))
+
+        message = ConversationMessage(
+            conversation_id=conversation.id,
+            role=role.value,
+            content=content,
+            sources=serialized_sources,
+        )
+
+        self.db.add(message)
+
+        conversation.updated_at = datetime.now(timezone.utc)
+
+        await self.db.flush()
+
+        return ChatMessage(
             role=role,
             content=content,
-            timestamp=datetime.now(timezone.utc),
+            timestamp=message.created_at,
             sources=sources or [],
         )
-        conversation.messages.append(message)
-        conversation.updated_at = message.timestamp
-        return message
 
-    def get_history(self, conversation_id: str) -> Conversation:
-        """Raises `ConversationNotFoundError` if `conversation_id` doesn't exist."""
-        return self.get(conversation_id)
+    async def get_history(
+        self,
+        conversation_id: str,
+        user_id: uuid.UUID,
+    ) -> Conversation:
+        """Return conversation and its persisted messages."""
 
-    def clear_history(self, conversation_id: str) -> None:
-        """
-        "Conversation Reset": clears a conversation's messages but keeps
-        its ID and repository binding — the next message continues under
-        the same `conversation_id` with a clean slate.
-        """
-        conversation = self.get(conversation_id)
-        conversation.messages.clear()
+        conversation = await self.get(
+            conversation_id,
+            user_id,
+        )
+
+        await self.db.refresh(
+            conversation,
+            attribute_names=["messages"],
+        )
+
+        return conversation
+
+    async def clear_history(
+        self,
+        conversation_id: str,
+        user_id: uuid.UUID,
+    ) -> None:
+        """Delete all messages while keeping the conversation."""
+
+        conversation = await self.get(
+            conversation_id,
+            user_id,
+        )
+
+        await self.db.refresh(
+            conversation,
+            attribute_names=["messages"],
+        )
+
+        for message in list(conversation.messages):
+            await self.db.delete(message)
+
         conversation.updated_at = datetime.now(timezone.utc)
-        logger.info("Conversation history cleared | id=%s", conversation_id)
 
-    def get_recent_turns_for_rag(self, conversation_id: str) -> List[ConversationTurn]:
-        """
-        Converts the most recent `_MAX_TURNS_FOR_RAG` messages into Step 8's
-        `ConversationTurn` shape for conversation-aware context building.
-        Returns an empty list for a brand-new conversation (no error).
-        """
-        conversation = self._CONVERSATIONS.get(conversation_id)
-        if conversation is None or not conversation.messages:
+        await self.db.flush()
+
+        logger.info(
+            "Conversation history cleared | id=%s | user_id=%s",
+            conversation_id,
+            user_id,
+        )
+
+    async def get_recent_turns_for_rag(
+        self,
+        conversation_id: str,
+        user_id: uuid.UUID,
+    ) -> List[ConversationTurn]:
+        """Return the most recent messages for conversation-aware RAG."""
+
+        conversation = await self.get(
+            conversation_id,
+            user_id,
+        )
+
+        await self.db.refresh(
+            conversation,
+            attribute_names=["messages"],
+        )
+
+        if not conversation.messages:
             return []
 
-        recent = conversation.messages[-_MAX_TURNS_FOR_RAG:]
-        return [ConversationTurn(role=m.role.value, content=m.content) for m in recent]
+        recent_messages = conversation.messages[-_MAX_TURNS_FOR_RAG:]
 
-    def count_conversations(self, repository_name: Optional[str] = None) -> int:
-        """Returns the total number of in-memory conversations, optionally scoped to
-        one repository. Used by the Analytics module (Step 12) — read-only, does not
-        expose conversation content, only a count."""
-        if repository_name is None:
-            return len(self._CONVERSATIONS)
-        return sum(1 for c in self._CONVERSATIONS.values() if c.repository_name == repository_name)
+        return [
+            ConversationTurn(
+                role=message.role,
+                content=message.content,
+            )
+            for message in recent_messages
+        ]
+
+    async def list_conversations(
+        self,
+        user_id: uuid.UUID,
+        repository_name: Optional[str] = None,
+    ) -> List[Conversation]:
+        """List conversations belonging only to the authenticated user."""
+
+        query = select(Conversation).where(
+            Conversation.user_id == user_id
+        )
+
+        if repository_name:
+            query = query.where(
+                Conversation.repository_name == repository_name
+            )
+
+        query = query.order_by(
+            Conversation.updated_at.desc()
+        )
+
+        result = await self.db.execute(query)
+
+        return list(result.scalars().all())
+
+    async def delete_conversation(
+        self,
+        conversation_id: str,
+        user_id: uuid.UUID,
+    ) -> None:
+        """Permanently delete a conversation owned by the user."""
+
+        conversation = await self.get(
+            conversation_id,
+            user_id,
+        )
+
+        await self.db.delete(conversation)
+        await self.db.flush()
+
+        logger.info(
+            "Conversation deleted | id=%s | user_id=%s",
+            conversation_id,
+            user_id,
+        )
+
+    async def count_conversations(
+        self,
+        user_id: Optional[uuid.UUID] = None,
+        repository_name: Optional[str] = None,
+    ) -> int:
+        """Count conversations, optionally scoped to user/repository."""
+
+        query = select(
+            func.count(Conversation.id)
+        )
+
+        if user_id is not None:
+            query = query.where(
+                Conversation.user_id == user_id
+            )
+
+        if repository_name is not None:
+            query = query.where(
+                Conversation.repository_name == repository_name
+            )
+
+        result = await self.db.execute(query)
+
+        return int(result.scalar_one())
 
 
-def get_conversation_service() -> ConversationService:
-    """FastAPI dependency provider — see app/services/chat_service.py."""
-    return ConversationService()
+def get_conversation_service(
+    db: AsyncSession = Depends(get_db),
+) -> ConversationService:
+    """FastAPI dependency provider."""
+
+    return ConversationService(db)

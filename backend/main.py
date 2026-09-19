@@ -146,7 +146,7 @@ def create_app() -> FastAPI:
 
     # AI Chat Engine module (Step 9). Uses the RAG Pipeline module above
     # to ground Gemini's answers in actual repository content.
-    app.include_router(chat_router, prefix="/api/chat")
+    app.include_router(chat_router, prefix="/api")
 
     # Repository Analytics & AI Insights Dashboard module (Step 12).
     # Read-only views over data already produced by every module above —

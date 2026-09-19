@@ -1,4 +1,4 @@
-"""
+﻿"""
 app/models/user.py
 
 SQLAlchemy ORM model for the `users` table.
@@ -44,23 +44,32 @@ class User(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     is_verified: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
-    last_login: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_login: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
     refresh_tokens: Mapped[List["RefreshToken"]] = relationship(
-        back_populates="user", cascade="all, delete-orphan", lazy="selectin"
-    )
-    login_sessions: Mapped[List["LoginSession"]] = relationship(
-        back_populates="user", cascade="all, delete-orphan", lazy="selectin"
+        back_populates="user",
+        cascade="all, delete-orphan",
+        lazy="selectin",
     )
 
-    def __repr__(self) -> str:  # pragma: no cover — debugging aid only
+    login_sessions: Mapped[List["LoginSession"]] = relationship(
+        back_populates="user",
+        cascade="all, delete-orphan",
+        lazy="selectin",
+    )
+
+    conversations: Mapped[List["Conversation"]] = relationship(
+        back_populates="user",
+        cascade="all, delete-orphan",
+        lazy="selectin",
+    )
+
+    def __repr__(self) -> str:  # pragma: no cover
         return f"<User id={self.id} username={self.username!r} role={self.role.value}>"
 
 
-# NOTE: `RefreshToken` / `LoginSession` above are referenced only as string
-# forward-refs ("RefreshToken", "LoginSession") to avoid a circular import
-# with `app.models.session` (which itself references "User" back). Both
-# model modules are imported together in `app/models/__init__.py`, which
-# registers every class on `Base`'s mapper registry before any relationship
-# is actually resolved (SQLAlchemy resolves string refs lazily, at first
-# use — not at class-definition time).
+# NOTE: `RefreshToken`, `LoginSession`, and `Conversation` are referenced
+# using string forward-refs to avoid circular imports. These model modules
+# are imported together in `app/models/__init__.py`.

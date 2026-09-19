@@ -1,72 +1,57 @@
 """
 app/api/chat.py
 
-HTTP layer for the AI Chat Engine module (Step 9).
+HTTP layer for the AI Chat Engine.
 
-Thin router — validates input via Pydantic, delegates to `ChatService`,
-shapes the response. Error translation (invalid request, repository not
-indexed, empty context, Gemini auth/rate-limit/timeout/provider failures)
-happens via domain exceptions + the global exception handlers.
+All chat and conversation operations are scoped to the
+authenticated user.
 """
 
 from __future__ import annotations
 
 import json
+from typing import Any, AsyncIterator, Dict, Optional
 
-from fastapi import APIRouter, Depends, Query, status
+from fastapi import APIRouter, Depends, Query
 from fastapi.responses import StreamingResponse
 
 from app.core.logging import get_logger
-from app.schemas.chat import (
-    ChatRequest,
-    ChatResponse,
-    ClearHistoryResponse,
-    HistoryResponse,
-    ModelsResponse,
-)
-from app.services.chat_service import ChatService, get_chat_service
 from app.middleware.rate_limit import rate_limit
+from app.models.user import User
+from app.schemas.chat import ChatRequest, ChatResponse
+from app.services.auth_service import get_current_user
+from app.services.chat_service import ChatService, get_chat_service
+
 
 logger = get_logger("api.chat")
 
-# Step 15: every chat turn calls Gemini (real cost + latency), so this is
-# throttled — 20/min/IP comfortably covers normal back-and-forth
-# conversation while limiting runaway/scripted usage. History/list/delete
-# reads share the bucket too, kept simple; they're cheap enough that the
-# same generous limit doesn't affect normal use.
-router = APIRouter(tags=["Chat"], dependencies=[Depends(rate_limit("chat", 20, 60))])
+router = APIRouter(
+    prefix="/chat",
+    tags=["Chat"],
+    dependencies=[Depends(rate_limit("chat", 20, 60))],
+)
 
+
+# ------------------------------------------------------------------
+# Normal chat
+# ------------------------------------------------------------------
 
 @router.post(
     "",
     response_model=ChatResponse,
-    status_code=status.HTTP_200_OK,
-    summary="Send a message and get a complete answer (non-streaming)",
+    summary="Chat with an indexed repository",
 )
 async def chat(
     payload: ChatRequest,
+    current_user: User = Depends(get_current_user),
     service: ChatService = Depends(get_chat_service),
 ) -> ChatResponse:
-    """
-    Runs the full chat flow: retrieve repository context (Step 8 RAG) ->
-    build prompt -> call Gemini -> attach citations -> save conversation
-    -> return the answer.
+    """Run a normal non-streaming repository chat."""
 
-    Omit `conversation_id` to start a new conversation; pass one back in
-    subsequent calls to continue it (and enable conversation memory).
-
-    Returns 400 for an empty message, 404 if the repository isn't
-    indexed or nothing relevant is found, 401/429/504/502 for Gemini
-    auth/rate-limit/timeout/provider failures.
-    """
-    logger.info(
-        "Received chat request | repo=%s | conversation=%s",
-        payload.repository_name,
-        payload.conversation_id or "(new)",
-    )
     return await service.chat(
         repository_name=payload.repository_name,
         message=payload.message,
+        user_id=current_user.id,
         conversation_id=payload.conversation_id,
         top_k=payload.top_k,
         score_threshold=payload.score_threshold,
@@ -75,118 +60,213 @@ async def chat(
     )
 
 
+# ------------------------------------------------------------------
+# Streaming chat
+# ------------------------------------------------------------------
+
 @router.post(
     "/stream",
-    status_code=status.HTTP_200_OK,
-    summary="Send a message and stream the answer as Server-Sent Events",
+    summary="Stream an AI response",
 )
 async def chat_stream(
     payload: ChatRequest,
+    current_user: User = Depends(get_current_user),
     service: ChatService = Depends(get_chat_service),
 ) -> StreamingResponse:
-    """
-    Same flow as POST /api/chat, but streams the answer incrementally as
-    it's generated (Server-Sent Events). Each text chunk is sent as:
+    """Stream Gemini's response using Server-Sent Events."""
 
-        event: chunk
-        data: {"text": "..."}
-
-    followed by a final event once generation completes:
-
-        event: done
-        data: {"conversation_id": "...", "sources": [...], "similarity_scores": [...], ...}
-
-    Or, on failure mid-stream:
-
-        event: error
-        data: {"error": {"code": "...", "message": "..."}}
-    """
-    logger.info(
-        "Received chat stream request | repo=%s | conversation=%s",
-        payload.repository_name,
-        payload.conversation_id or "(new)",
-    )
-
-    async def event_generator():
+    async def event_generator() -> AsyncIterator[str]:
         try:
             async for text_chunk, metadata in service.chat_stream(
                 repository_name=payload.repository_name,
                 message=payload.message,
+                user_id=current_user.id,
                 conversation_id=payload.conversation_id,
                 top_k=payload.top_k,
                 score_threshold=payload.score_threshold,
                 language=payload.language,
                 file_name=payload.file_name,
             ):
-                if metadata is not None:
-                    yield f"event: done\ndata: {json.dumps(metadata)}\n\n"
+                if metadata is None:
+                    yield (
+                        "event: chunk\n"
+                        f"data: {json.dumps({'text': text_chunk})}\n\n"
+                    )
                 else:
-                    yield f"event: chunk\ndata: {json.dumps({'text': text_chunk})}\n\n"
-        except Exception as exc:  # noqa: BLE001
-            error_code = getattr(exc, "error_code", "chat_stream_error")
-            error_message = getattr(exc, "message", str(exc))
-            logger.exception("Chat stream failed: %s", exc)
-            yield (
-                f"event: error\n"
-                f"data: {json.dumps({'error': {'code': error_code, 'message': error_message}})}\n\n"
+                    yield (
+                        "event: done\n"
+                        f"data: {json.dumps(metadata)}\n\n"
+                    )
+
+        except Exception as exc:
+            logger.exception(
+                "Chat stream failed | user_id=%s",
+                current_user.id,
             )
 
-    return StreamingResponse(event_generator(), media_type="text/event-stream")
+            yield (
+                "event: error\n"
+                f"data: {json.dumps({'error': str(exc)})}\n\n"
+            )
 
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+# ------------------------------------------------------------------
+# Conversation history
+# ------------------------------------------------------------------
 
 @router.get(
     "/history",
-    response_model=HistoryResponse,
-    status_code=status.HTTP_200_OK,
-    summary="Get a conversation's full message history",
+    summary="Get conversation history",
 )
 async def get_history(
-    conversation_id: str = Query(..., description="The conversation ID returned by a prior chat call."),
+    conversation_id: str = Query(...),
+    current_user: User = Depends(get_current_user),
     service: ChatService = Depends(get_chat_service),
-) -> HistoryResponse:
-    """Returns every message (user + assistant, with citations) for `conversation_id`.
+) -> Dict[str, Any]:
+    """Return persisted messages for the authenticated user's conversation."""
 
-    Returns 404 if the conversation doesn't exist.
-    """
-    conversation = service.get_history(conversation_id)
-    return HistoryResponse(
-        conversation_id=conversation.conversation_id,
-        repository_name=conversation.repository_name,
-        messages=conversation.messages,
-        message_count=len(conversation.messages),
+    conversation = await service.get_history(
+        conversation_id=conversation_id,
+        user_id=current_user.id,
     )
 
+    return {
+        "success": True,
+        "conversation_id": str(conversation.id),
+        "repository_name": conversation.repository_name,
+        "title": conversation.title,
+        "messages": [
+            {
+                "id": str(message.id),
+                "role": message.role,
+                "content": message.content,
+                "timestamp": message.created_at,
+                "sources": [],
+            }
+            for message in conversation.messages
+        ],
+        "message_count": len(conversation.messages),
+        "created_at": conversation.created_at,
+        "updated_at": conversation.updated_at,
+    }
+
+
+# ------------------------------------------------------------------
+# Conversation list
+# ------------------------------------------------------------------
+
+@router.get(
+    "/conversations",
+    summary="List the authenticated user's conversations",
+)
+async def list_conversations(
+    repository_name: Optional[str] = Query(None),
+    current_user: User = Depends(get_current_user),
+    service: ChatService = Depends(get_chat_service),
+) -> Dict[str, Any]:
+    """Return conversations belonging only to the authenticated user."""
+
+    conversations = await service.list_conversations(
+        user_id=current_user.id,
+        repository_name=repository_name,
+    )
+
+    return {
+        "success": True,
+        "conversations": [
+            {
+                "id": str(conversation.id),
+                "repository_name": conversation.repository_name,
+                "title": conversation.title,
+                "message_count": len(conversation.messages),
+                "created_at": conversation.created_at,
+                "updated_at": conversation.updated_at,
+            }
+            for conversation in conversations
+        ],
+        "count": len(conversations),
+    }
+
+
+# ------------------------------------------------------------------
+# Clear conversation messages
+# ------------------------------------------------------------------
 
 @router.delete(
     "/history",
-    response_model=ClearHistoryResponse,
-    status_code=status.HTTP_200_OK,
-    summary="Reset a conversation (clear its message history)",
+    summary="Clear conversation messages",
 )
 async def clear_history(
-    conversation_id: str = Query(..., description="The conversation to reset."),
+    conversation_id: str = Query(...),
+    current_user: User = Depends(get_current_user),
     service: ChatService = Depends(get_chat_service),
-) -> ClearHistoryResponse:
-    """Clears `conversation_id`'s messages — the ID remains valid for continued use.
+) -> Dict[str, Any]:
+    """Clear messages while keeping the conversation."""
 
-    Returns 404 if the conversation doesn't exist.
-    """
-    service.clear_history(conversation_id)
-    return ClearHistoryResponse(
-        message=f"Conversation '{conversation_id}' history cleared.",
+    await service.clear_history(
         conversation_id=conversation_id,
+        user_id=current_user.id,
     )
 
+    return {
+        "success": True,
+        "message": "Conversation history cleared.",
+        "conversation_id": conversation_id,
+    }
+
+
+# ------------------------------------------------------------------
+# Delete conversation completely
+# ------------------------------------------------------------------
+
+@router.delete(
+    "/conversations/{conversation_id}",
+    summary="Delete a conversation",
+)
+async def delete_conversation(
+    conversation_id: str,
+    current_user: User = Depends(get_current_user),
+    service: ChatService = Depends(get_chat_service),
+) -> Dict[str, Any]:
+    """Permanently delete a conversation owned by the authenticated user."""
+
+    await service.delete_conversation(
+        conversation_id=conversation_id,
+        user_id=current_user.id,
+    )
+
+    return {
+        "success": True,
+        "message": "Conversation deleted.",
+        "conversation_id": conversation_id,
+    }
+
+
+# ------------------------------------------------------------------
+# Models
+# ------------------------------------------------------------------
 
 @router.get(
     "/models",
-    response_model=ModelsResponse,
-    status_code=status.HTTP_200_OK,
-    summary="List available chat models and their configuration status",
+    summary="List available chat models",
 )
 async def list_models(
+    current_user: User = Depends(get_current_user),
     service: ChatService = Depends(get_chat_service),
-) -> ModelsResponse:
-    """Returns the currently configured Gemini model and its readiness."""
-    models = service.list_models()
-    return ModelsResponse(active_model=models[0]["name"], models=models)
+) -> Dict[str, Any]:
+    """Return configured AI models."""
+
+    return {
+        "success": True,
+        "models": service.list_models(),
+    }
