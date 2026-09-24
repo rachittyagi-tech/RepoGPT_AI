@@ -2,7 +2,7 @@ import { FormEvent, useState } from "react";
 import { Navigate, useLocation, useNavigate } from "react-router-dom";
 
 import { useAuth } from "@/contexts/auth-context";
-import { APP_NAME } from "@/utils/constants";
+import { API_BASE_URL, APP_NAME } from "@/utils/constants";
 
 type AuthMode = "login" | "register";
 
@@ -115,7 +115,7 @@ export default function LoginPage() {
     setIsSubmitting(true);
 
     try {
-      const response = await fetch("/api/auth/register", {
+      const response = await fetch(`${API_BASE_URL}/api/auth/register`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
