@@ -87,4 +87,4 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
 # tune via the `WEB_CONCURRENCY` env var override below or in your platform's
 # service definition. `docker-compose.yml` (dev) overrides this whole CMD
 # with `uvicorn main:app --reload` for hot-reloading.
-CMD ["sh", "-c", "gunicorn main:app --worker-class uvicorn.workers.UvicornWorker --workers ${WEB_CONCURRENCY:-2} --bind 0.0.0.0:8000 --timeout 120 --access-logfile - --error-logfile -"]
+CMD ["sh", "-c", "alembic upgrade head && exec gunicorn main:app --worker-class uvicorn.workers.UvicornWorker --workers ${WEB_CONCURRENCY:-2} --bind 0.0.0.0:8000 --timeout 120 --access-logfile - --error-logfile -"]
